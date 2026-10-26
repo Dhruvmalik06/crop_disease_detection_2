@@ -6,29 +6,52 @@ import numpy as np
 from io import BytesIO
 from PIL import Image
 import tensorflow as tf
+from pathlib import Path
+
+
 
 
 app = FastAPI()
 
-
-origins = [
-    "http://localhost",
-    "http://localhost:3000",
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[
+        "http://localhost",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-MODEL = tf.saved_model.load(str("../crop_disease_detection_2/models/1"))
-CLASS_NAMES = ['Early Blight', 'Late Blight', 'Healthy']
-print("Available signatures:", list(MODEL.signatures.keys()))
+# Locate the repository root using this file's location.
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODEL_PATH = BASE_DIR / "models" / "1"
+
+print("Looking for model at:", MODEL_PATH)
+print("Model directory exists:", MODEL_PATH.is_dir())
+
+if not (MODEL_PATH / "saved_model.pb").is_file():
+    raise FileNotFoundError(
+        f"SavedModel not found at {MODEL_PATH}. "
+        "Check the model folder and Render Root Directory."
+    )
+
+# Load the model exported with model.export()
+MODEL = tf.saved_model.load(str(MODEL_PATH))
+
+if "serving_default" not in MODEL.signatures:
+    raise RuntimeError(
+        f"serving_default signature not found. "
+        f"Available signatures: {list(MODEL.signatures.keys())}"
+    )
 
 infer = MODEL.signatures["serving_default"]
 
+CLASS_NAMES = ["Early Blight", "Late Blight", "Healthy"]
+
+print("Model loaded successfully!")
+print("Available signatures:", list(MODEL.signatures.keys()))
 print("Input details:", infer.structured_input_signature)
 print("Output details:", infer.structured_outputs)
 
@@ -37,66 +60,58 @@ print("Output details:", infer.structured_outputs)
 def home():
     return {"message": "Crop Disease Detection API is running!"}
 
-def read_file_as_image(data) -> np.ndarray:
-    image = np.array(Image.open(BytesIO(data)))
-    return image
 
+def read_file_as_image(data) -> np.ndarray:
+    image = Image.open(BytesIO(data)).convert("RGB")
+    return np.array(image)
 
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-      image = read_file_as_image(await file.read())
-      image_batch = np.expand_dims(image, 0)
-      print("Model type:", type(MODEL))
-      print("Available signatures:", list(MODEL.signatures.keys()))
+    image = read_file_as_image(await file.read())
+    image_batch = np.expand_dims(image, axis=0)
 
-      infer = MODEL.signatures["serving_default"]
+    input_name = list(
+        infer.structured_input_signature[1].keys()
+    )[0]
 
-      print("Input signature:", infer.structured_input_signature)
-      print("Output signature:", infer.structured_outputs)
+    input_spec = infer.structured_input_signature[1][input_name]
 
-      print("Image batch shape:", image_batch.shape)
-      print("Image batch dtype:", image_batch.dtype)
-      
-    
-      input_name = list(
-          infer.structured_input_signature[1].keys()
-      )[0]
+    image_tensor = tf.convert_to_tensor(
+        image_batch,
+        dtype=input_spec.dtype,
+    )
 
-      input_spec = infer.structured_input_signature[1][input_name]
+    outputs = infer(**{input_name: image_tensor})
+    output_tensor = next(iter(outputs.values()))
+    predictions = output_tensor.numpy()[0]
 
-   
-      image_tensor = tf.convert_to_tensor(
-          image_batch,
-          dtype=input_spec.dtype
-     )
+    predicted_index = int(np.argmax(predictions))
 
-    
-      result = infer(**{input_name: image_tensor})
+    if predicted_index >= len(CLASS_NAMES):
+        raise RuntimeError(
+            f"Model returned unexpected output shape: {predictions.shape}"
+        )
 
-      output_tensor = next(iter(result.values()))
-      predictions = output_tensor.numpy()[0]
+    confidence = float(predictions[predicted_index])
+    predicted_class = CLASS_NAMES[predicted_index]
 
-      
-      predicted_index = int(np.argmax(predictions))
-      confidence = float(predictions[predicted_index])
+    return {
+        "class": predicted_class,
+        "predicted_class_index": predicted_index,
+        "confidence": confidence,
+        "prediction_scores": predictions.tolist(),
+    }
 
-      predicted_class = CLASS_NAMES[predicted_index]
 
-      print("All prediction scores:", predictions)
-      print("Predicted class index:", predicted_index)
-      print("Predicted class:", predicted_class)
-      print("Confidence score:", confidence)
 
-      return {
-          "class": predicted_class,
-          "predicted_class_index": predicted_index,
-          "confidence": confidence,
-          "prediction_scores": predictions.tolist()
-  }
-
-    
-    
     
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    import os
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000))
+    )    
+    
+
