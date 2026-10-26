@@ -18,6 +18,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost",
         "http://localhost:3000",
+        "https://crop-disease-detection-2-1.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
